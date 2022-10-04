@@ -20,22 +20,29 @@ from utils import adjust_learning_rate, accuracy, AverageMeter
 def main():
     opt = TrainOption().parse()
     
-    # tensorboard
-    logger = tb_logger.Logger(logdir=opt.tb_folder, flush_secs=2)
+    # cuda device
+    opt.device = torch.device(f'cuda:'+str(opt.gpu_id) if torch.cuda.is_available() else 'cpu')
+    torch.cuda.set_device(opt.device)
     
-    # use the ImageNet transformation
+    best_acc = 0
+    
+    # ImageNet transformation
     transform = transforms.Compose([transforms.Resize((224, 224)), 
                                     transforms.ToTensor(),
                                     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
 
-    # define the dataloader to load that single image
-    train_loader = DataLoader(dataset=TrainDataset(), shuffle=False, batch_size=1)
-    val_loader = DataLoader(dataset=TestDataset(), shuffle=False, batch_size=1)
+    # dataloader
+    train_loader = DataLoader(dataset=TrainDataset(opt, transform),
+                              shuffle=True,
+                              batch_size=opt.batch_size,
+                              num_workers=opt.num_workers)
+    val_loader = DataLoader(dataset=TestDataset(opt, transform), 
+                            shuffle=False, 
+                            batch_size=opt.batch_size,
+                            num_workers=opt.num_workers)
     
-    # initialize the model
+    # model
     model = VGG()
-    
-    criterion = nn.CrossEntropy()
     
     # optimizer
     optimizer = optim.SGD(model.parameters(),
@@ -43,32 +50,34 @@ def main():
                             momentum=opt.momentum,
                             weight_decay=opt.weight_decay)
     
+    # criterion
+    criterion = nn.CrossEntropy()
+    
     if torch.cuda.is_available():
         model = model.cuda()
         criterion = criterion.cuda()
         cudnn.benchmark = True
-        
-    # train routine
+    
+    # tensorboard
+    logger = tb_logger.Logger(logdir=opt.tb_folder, flush_secs=2)
+    
+    # routine
     for epoch in range(1, opt.epochs + 1):
         adjust_learning_rate(epoch, opt, optimizer)
-        print("==> training student...")
-        
-        # train step
+        print("==> training...")
+
         time1 = time.time()
-        
-        train_loss, train_acc = train(epoch, model, train_loader, optimizer, criterion)
-        
+        train_acc, train_loss = train(epoch, train_loader, model, criterion, optimizer, opt)
         time2 = time.time()
-        
         print('epoch {}, total time {:.2f}'.format(epoch, time2 - time1))
-        
+
         logger.log_value('train_acc', train_acc, epoch)
         logger.log_value('train_loss', train_loss, epoch)
-                
-        # validation step
-        test_loss, test_acc = validate(epoch, model, val_loader, criterion)
+
+        test_acc, test_acc_top5, test_loss = validate(val_loader, model, criterion, opt)
 
         logger.log_value('test_acc', test_acc, epoch)
+        logger.log_value('test_acc_top5', test_acc_top5, epoch)
         logger.log_value('test_loss', test_loss, epoch)
 
         # save the best model
@@ -80,7 +89,7 @@ def main():
                 'best_acc': best_acc,
                 'optimizer': optimizer.state_dict(),
             }
-            save_file = os.path.join(opt.save_folder, '{}_best.pth'.format(opt.model_s))
+            save_file = os.path.join(opt.save_folder, '{}_best.pth'.format(opt.model))
             print('saving the best model!')
             torch.save(state, save_file)
 
@@ -89,15 +98,25 @@ def main():
             print('==> Saving...')
             state = {
                 'epoch': epoch,
-                'model': model_s.state_dict(),
+                'model': model.state_dict(),
                 'accuracy': test_acc,
                 'optimizer': optimizer.state_dict(),
             }
             save_file = os.path.join(opt.save_folder, 'ckpt_epoch_{epoch}.pth'.format(epoch=epoch))
             torch.save(state, save_file)
 
-    # This best accuracy is only for printing purpose.
+    # best accuracy
     print('best accuracy:', best_acc)
+
+    # save model
+    state = {
+        'opt': opt,
+        'model': model.state_dict(),
+        'optimizer': optimizer.state_dict(),
+    }
+    save_file = os.path.join(opt.save_folder, '{}_last.pth'.format(opt.model))
+    torch.save(state, save_file)
+
 
 def train(epoch, model, train_loader, optimizer, criterion):
     model.train()
@@ -137,11 +156,11 @@ def train(epoch, model, train_loader, optimizer, criterion):
         # print info
         if idx % 100 == 0:
             print('Epoch: [{0}][{1}/{2}]\t'
-                  'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
-                  'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
-                  'Acc@1 {top1.val:.3f} ({top1.avg:.3f})\t'.format(
-                   epoch, idx, len(train_loader), batch_time=batch_time,
-                   loss=losses, top1=top1))
+                    'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
+                    'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
+                    'Acc@1 {top1.val:.3f} ({top1.avg:.3f})\t'.format(
+                    epoch, idx, len(train_loader), batch_time=batch_time,
+                    loss=losses, top1=top1))
             sys.stdout.flush()
     
     print(' * Acc@1 {top1.avg:.3f}'.format(top1=top1))
@@ -185,3 +204,5 @@ def validate(epoch, model, val_loader, criterion):
 
 if __name__ == '__main__':
     main()
+    
+    
